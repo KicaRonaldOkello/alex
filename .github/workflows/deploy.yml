@@ -17,7 +17,7 @@ permissions:
 
 env:
   AWS_REGION: eu-west-1
-  TERRAFORM_STATE_BUCKET: alex-terraform-state-603047573807
+  TERRAFORM_STATE_BUCKET: alex-terraform-state-218254970853
   TERRAFORM_LOCK_TABLE: alex-terraform-lock
 
 jobs:
@@ -582,7 +582,7 @@ jobs:
       - name: Terraform Destroy - Frontend
         working-directory: terraform/7_frontend
         run: |
-          aws s3 rm s3://alex-frontend-603047573807 --recursive 2>/dev/null || true
+          aws s3 rm s3://alex-frontend-218254970853 --recursive 2>/dev/null || true
           terraform init
           terraform destroy -auto-approve
         env:

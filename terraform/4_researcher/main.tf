@@ -9,7 +9,7 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "alex-terraform-state-603047573807"
+    bucket         = "alex-terraform-state-218254970853"
     key            = "4_researcher/terraform.tfstate"
     region         = "eu-west-1"
     dynamodb_table = "alex-terraform-lock"
