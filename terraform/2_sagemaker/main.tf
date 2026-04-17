@@ -7,9 +7,14 @@ terraform {
       version = "~> 5.70"
     }
   }
-  
-  # Using local backend - state will be stored in terraform.tfstate in this directory
-  # This is automatically gitignored for security
+
+  backend "s3" {
+    bucket         = "alex-terraform-state-603047573807"
+    key            = "2_sagemaker/terraform.tfstate"
+    region         = "eu-west-1"
+    dynamodb_table = "alex-terraform-lock"
+    encrypt        = true
+  }
 }
 
 provider "aws" {

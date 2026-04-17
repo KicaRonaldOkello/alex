@@ -1,82 +1,762 @@
-name: Deploy Alex (frontend + API)
+name: Deploy / Destroy Alex Infrastructure
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - destroy
 
 permissions:
   id-token: write
   contents: read
 
-concurrency:
-  group: deploy-alex-part7-${{ github.ref }}
-  cancel-in-progress: false
+env:
+  AWS_REGION: eu-west-1
+  TERRAFORM_STATE_BUCKET: alex-terraform-state-603047573807
+  TERRAFORM_LOCK_TABLE: alex-terraform-lock
 
 jobs:
-  deploy:
-    name: Part 7 — deploy.py
+  # ============================================================
+  # SETUP TERRAFORM STATE INFRASTRUCTURE
+  # ============================================================
+
+  setup-terraform-state:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    env:
-      AWS_REGION: ${{ secrets.DEFAULT_AWS_REGION }}
-      DEFAULT_AWS_REGION: ${{ secrets.DEFAULT_AWS_REGION }}
-      TF_VAR_clerk_jwks_url: ${{ secrets.CLERK_JWKS_URL }}
-      TF_VAR_clerk_issuer: ${{ secrets.CLERK_ISSUER }}
-      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
-
+    if: github.event.inputs.action == 'deploy'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          role-session-name: github-actions-alex-deploy-py
-          aws-region: ${{ secrets.DEFAULT_AWS_REGION }}
+          role-session-name: github-actions-alex-infrastructure
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Set up Python
+      - name: Create S3 bucket for Terraform state
+        run: |
+          if ! aws s3api head-bucket --bucket ${{ env.TERRAFORM_STATE_BUCKET }} 2>/dev/null; then
+            aws s3 mb s3://${{ env.TERRAFORM_STATE_BUCKET }} --region ${{ env.AWS_REGION }}
+            echo "Created S3 bucket: ${{ env.TERRAFORM_STATE_BUCKET }}"
+          else
+            echo "S3 bucket already exists: ${{ env.TERRAFORM_STATE_BUCKET }}"
+          fi
+
+      - name: Create DynamoDB table for state locking
+        run: |
+          if ! aws dynamodb describe-table --table-name ${{ env.TERRAFORM_LOCK_TABLE }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            aws dynamodb create-table \
+              --table-name ${{ env.TERRAFORM_LOCK_TABLE }} \
+              --attribute-definitions AttributeName=LockID,AttributeType=S \
+              --key-schema AttributeName=LockID,KeyType=HASH \
+              --billing-mode PAY_PER_REQUEST \
+              --region ${{ env.AWS_REGION }}
+            echo "Created DynamoDB table: ${{ env.TERRAFORM_LOCK_TABLE }}"
+          else
+            echo "DynamoDB table already exists: ${{ env.TERRAFORM_LOCK_TABLE }}"
+          fi
+
+      - name: Clear stale terraform state locks
+        run: |
+          echo "Checking for stale terraform state locks..."
+          state_files=$(aws s3 ls s3://${{ env.TERRAFORM_STATE_BUCKET }}/ --recursive 2>/dev/null | grep terraform.tfstate || echo "")
+          if [ -z "$state_files" ]; then
+            echo "No state files found, skipping lock cleanup"
+          else
+            echo "$state_files" | while read -r line; do
+              key=$(echo "$line" | awk '{print $4}')
+              if [ -n "$key" ]; then
+                lock_id="${{ env.TERRAFORM_STATE_BUCKET }}/${key}"
+                echo "Clearing lock: $lock_id"
+                aws dynamodb delete-item \
+                  --table-name ${{ env.TERRAFORM_LOCK_TABLE }} \
+                  --key "{\"LockID\": {\"S\": \"$lock_id\"}}" \
+                  --region ${{ env.AWS_REGION }} \
+                  2>/dev/null || true
+              fi
+            done
+            echo "State locks cleared"
+          fi
+
+  # ============================================================
+  # PACKAGE LAMBDA FUNCTIONS (All - before terraform runs)
+  # ============================================================
+
+  package-all-lambdas:
+    needs: setup-terraform-state
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'deploy'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install uv
+      - name: Package Ingest Lambda
+        working-directory: backend/ingest
         run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          uv sync
+          mkdir -p package
+          cp ingest_s3vectors.py search_s3vectors.py package/
+          SITE_PKG=$(find .venv/lib -name "site-packages" -type d | head -1)
+          cp -r "$SITE_PKG"/* ./package/
+          cd package && zip -r ../lambda_function.zip .
+
+      - name: Package API Lambda
+        run: |
+          mkdir -p api_package
+          cat > api_package/requirements.txt << 'EOF'
+          fastapi>=0.116.0
+          uvicorn>=0.35.0
+          mangum>=0.19.0
+          boto3>=1.26.0
+          fastapi-clerk-auth>=0.0.7
+          pydantic>=2.0.0
+          python-dotenv>=1.0.0
+          EOF
+          pip install --no-cache-dir --target ./api_package -r api_package/requirements.txt
+          cp -r backend/api/ ./api_package/api/
+          cp backend/api/lambda_handler.py ./api_package/lambda_handler.py
+          cp -r backend/database/src ./api_package/src/
+          mkdir -p backend/api
+          cd api_package && zip -r ../backend/api/api_lambda.zip .
+
+      - name: Package Tagger Lambda
+        working-directory: backend/tagger
+        run: |
+          uv export --no-hashes --no-emit-project -o requirements.txt
+          pip install --no-cache-dir --target ./package -r requirements.txt
+          rm -rf ./package/pyperclip 2>/dev/null || true
+          cp -r ../database/src ./package/
+          cp lambda_handler.py agent.py templates.py observability.py ./package/
+          cd package && zip -r ../tagger_lambda.zip .
+
+      - name: Package Reporter Lambda
+        working-directory: backend/reporter
+        run: |
+          uv export --no-hashes --no-emit-project -o requirements.txt
+          pip install --no-cache-dir --target ./package -r requirements.txt
+          rm -rf ./package/pyperclip 2>/dev/null || true
+          cp -r ../database/src ./package/
+          cp lambda_handler.py agent.py templates.py observability.py judge.py ./package/
+          cd package && zip -r ../reporter_lambda.zip .
+
+      - name: Package Charter Lambda
+        working-directory: backend/charter
+        run: |
+          uv export --no-hashes --no-emit-project -o requirements.txt
+          pip install --no-cache-dir --target ./package -r requirements.txt
+          rm -rf ./package/pyperclip 2>/dev/null || true
+          cp -r ../database/src ./package/
+          cp lambda_handler.py agent.py templates.py observability.py ./package/
+          cd package && zip -r ../charter_lambda.zip .
+
+      - name: Package Retirement Lambda
+        working-directory: backend/retirement
+        run: |
+          uv export --no-hashes --no-emit-project -o requirements.txt
+          pip install --no-cache-dir --target ./package -r requirements.txt
+          rm -rf ./package/pyperclip 2>/dev/null || true
+          cp -r ../database/src ./package/
+          cp lambda_handler.py agent.py templates.py observability.py ./package/
+          cd package && zip -r ../retirement_lambda.zip .
+
+      - name: Package Planner Lambda
+        working-directory: backend/planner
+        run: |
+          uv export --no-hashes --no-emit-project -o requirements.txt
+          pip install --no-cache-dir --target ./package -r requirements.txt
+          rm -rf ./package/pyperclip 2>/dev/null || true
+          cp -r ../database/src ./package/
+          cp lambda_handler.py agent.py templates.py observability.py market.py prices.py ./package/
+          cd package && zip -r ../planner_lambda.zip .
+
+      - name: Verify all Lambda packages exist
+        run: |
+          echo "=== Ingestion (Step 3) ==="
+          ls -la backend/ingest/*.zip || echo "No zips found"
+          echo ""
+          echo "=== Agents (Step 6) ==="
+          ls -la backend/*/*.zip || echo "No zips found"
+          echo ""
+          echo "=== API (Step 7) ==="
+          ls -la backend/api/*.zip || echo "No zips found"
+
+      - name: Upload Ingest Lambda
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingest-lambda
+          path: backend/ingest/lambda_function.zip
+
+      - name: Upload API Lambda
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-lambda
+          path: backend/api/api_lambda.zip
+
+      - name: Upload Tagger Lambda
+        uses: actions/upload-artifact@v4
+        with:
+          name: tagger-lambda
+          path: backend/tagger/tagger_lambda.zip
+
+      - name: Upload Reporter Lambda
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporter-lambda
+          path: backend/reporter/reporter_lambda.zip
+
+      - name: Upload Charter Lambda
+        uses: actions/upload-artifact@v4
+        with:
+          name: charter-lambda
+          path: backend/charter/charter_lambda.zip
+
+      - name: Upload Retirement Lambda
+        uses: actions/upload-artifact@v4
+        with:
+          name: retirement-lambda
+          path: backend/retirement/retirement_lambda.zip
+
+      - name: Upload Planner Lambda
+        uses: actions/upload-artifact@v4
+        with:
+          name: planner-lambda
+          path: backend/planner/planner_lambda.zip
+
+  # ============================================================
+  # TERRAFORM INFRASTRUCTURE - PART 1 (Steps 2-4)
+  # ============================================================
+
+  terraform-deploy-part1:
+    needs: [setup-terraform-state, package-all-lambdas]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'deploy'
+    outputs:
+      sagemaker_endpoint: ${{ steps.tf2.outputs.sagemaker_endpoint_name }}
+      vector_bucket: ${{ steps.tf3.outputs.vector_bucket_name }}
+      alex_api_endpoint: ${{ steps.tf3.outputs.api_endpoint }}
+      alex_api_key: ${{ steps.tf3.outputs.api_key_value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-alex-infrastructure
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
+          terraform_version: 1.7.0
           terraform_wrapper: false
+
+      - name: Terraform Init & Apply - SageMaker
+        id: tf2
+        working-directory: terraform/2_sagemaker
+        run: |
+          terraform init
+          terraform apply -auto-approve
+          echo "sagemaker_endpoint_name=$(terraform output -raw sagemaker_endpoint_name)" >> $GITHUB_OUTPUT
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_sagemaker_image_uri: "763104351884.dkr.ecr.eu-west-1.amazonaws.com/huggingface-pytorch-inference:1.13.1-transformers4.26.0-cpu-py39-ubuntu20.04"
+
+      - name: Download Ingest Lambda
+        uses: actions/download-artifact@v4
+        with:
+          name: ingest-lambda
+          path: backend/ingest/
+
+      - name: Terraform Init & Apply - Ingestion
+        id: tf3
+        working-directory: terraform/3_ingestion
+        run: |
+          terraform init
+          terraform apply -auto-approve
+          echo "vector_bucket_name=$(terraform output -raw vector_bucket_name)" >> $GITHUB_OUTPUT
+          echo "api_endpoint=$(terraform output -raw api_endpoint)" >> $GITHUB_OUTPUT
+          echo "api_key_value=$(terraform output -raw api_key_value)" >> $GITHUB_OUTPUT
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_sagemaker_endpoint_name: ${{ steps.tf2.outputs.sagemaker_endpoint_name }}
+
+      - name: Terraform Init & Apply - Researcher (ECR + IAM only)
+        working-directory: terraform/4_researcher
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -target=aws_ecr_repository.researcher \
+            -target=aws_iam_role.app_runner_role \
+            -target=aws_iam_role.app_runner_instance_role \
+            -target=aws_iam_role_policy_attachment.app_runner_ecr_access \
+            -target=aws_iam_role_policy.app_runner_instance_bedrock_access
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          TF_VAR_alex_api_endpoint: ${{ steps.tf3.outputs.api_endpoint }}
+          TF_VAR_alex_api_key: ${{ steps.tf3.outputs.api_key_value }}
+
+  # ============================================================
+  # BUILD RESEARCHER DOCKER (After ECR created in Step 4)
+  # ============================================================
+
+  build-researcher-docker:
+    needs: terraform-deploy-part1
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'deploy'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-alex-infrastructure
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        working-directory: backend/researcher
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --platform linux/amd64 -t $ECR_REGISTRY/alex-researcher:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/alex-researcher:$IMAGE_TAG
+          docker tag $ECR_REGISTRY/alex-researcher:$IMAGE_TAG $ECR_REGISTRY/alex-researcher:latest
+          docker push $ECR_REGISTRY/alex-researcher:latest
+
+      - name: Confirm image pushed
+        run: |
+          echo "Docker image pushed to ECR: ${{ steps.login-ecr.outputs.registry }}/alex-researcher:latest"
+
+  # ============================================================
+  # TERRAFORM INFRASTRUCTURE - PART 2 (Steps 5-8)
+  # ============================================================
+
+  terraform-deploy-part2:
+    needs: [terraform-deploy-part1, build-researcher-docker, package-all-lambdas]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'deploy'
+    outputs:
+      aurora_cluster_arn: ${{ steps.tf5.outputs.aurora_cluster_arn }}
+      aurora_secret_arn: ${{ steps.tf5.outputs.aurora_secret_arn }}
+      api_gateway_url: ${{ steps.tf7.outputs.api_gateway_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-alex-infrastructure
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+          terraform_wrapper: false
+
+      - name: Terraform Init & Apply - Researcher (App Runner)
+        working-directory: terraform/4_researcher
+        run: |
+          terraform init
+          terraform apply -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          TF_VAR_alex_api_endpoint: ${{ needs.terraform-deploy-part1.outputs.alex_api_endpoint }}
+          TF_VAR_alex_api_key: ${{ needs.terraform-deploy-part1.outputs.alex_api_key }}
+
+      - name: Terraform Init & Apply - Database
+        id: tf5
+        working-directory: terraform/5_database
+        run: |
+          terraform init
+          terraform apply -auto-approve
+          echo "aurora_cluster_arn=$(terraform output -raw aurora_cluster_arn)" >> $GITHUB_OUTPUT
+          echo "aurora_secret_arn=$(terraform output -raw aurora_secret_arn)" >> $GITHUB_OUTPUT
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_min_capacity: 0
+
+      - name: Download Tagger Lambda
+        uses: actions/download-artifact@v4
+        with:
+          name: tagger-lambda
+          path: backend/tagger/
+
+      - name: Download Reporter Lambda
+        uses: actions/download-artifact@v4
+        with:
+          name: reporter-lambda
+          path: backend/reporter/
+
+      - name: Download Charter Lambda
+        uses: actions/download-artifact@v4
+        with:
+          name: charter-lambda
+          path: backend/charter/
+
+      - name: Download Retirement Lambda
+        uses: actions/download-artifact@v4
+        with:
+          name: retirement-lambda
+          path: backend/retirement/
+
+      - name: Download Planner Lambda
+        uses: actions/download-artifact@v4
+        with:
+          name: planner-lambda
+          path: backend/planner/
+
+      - name: Verify Agent Lambda Files
+        run: |
+          echo "=== Agent Lambda Files ==="
+          ls -la backend/tagger/*.zip
+          ls -la backend/reporter/*.zip
+          ls -la backend/charter/*.zip
+          ls -la backend/retirement/*.zip
+          ls -la backend/planner/*.zip
+
+      - name: Terraform Init & Apply - Agents
+        working-directory: terraform/6_agents
+        run: |
+          terraform init
+          terraform apply -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_aurora_cluster_arn: ${{ steps.tf5.outputs.aurora_cluster_arn }}
+          TF_VAR_aurora_secret_arn: ${{ steps.tf5.outputs.aurora_secret_arn }}
+          TF_VAR_vector_bucket: ${{ needs.terraform-deploy-part1.outputs.vector_bucket }}
+          TF_VAR_bedrock_model_id: us.amazon.nova-pro-v1:0
+          TF_VAR_bedrock_region: us-west-2
+          TF_VAR_sagemaker_endpoint: ${{ needs.terraform-deploy-part1.outputs.sagemaker_endpoint }}
+          TF_VAR_polygon_api_key: ${{ secrets.POLYGON_API_KEY }}
+          TF_VAR_polygon_plan: free
+          TF_VAR_langfuse_public_key: pk-lf-99ffe882-0dde-4244-bb7c-f202a9f50d70
+          TF_VAR_langfuse_secret_key: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          TF_VAR_langfuse_host: https://cloud.langfuse.com
+          TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Download API Lambda
+        uses: actions/download-artifact@v4
+        with:
+          name: api-lambda
+          path: backend/api/
+
+      - name: Terraform Init & Apply - Frontend
+        id: tf7
+        working-directory: terraform/7_frontend
+        run: |
+          terraform init
+          terraform apply -auto-approve
+          echo "api_gateway_url=$(terraform output -raw api_gateway_url)" >> $GITHUB_OUTPUT
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_clerk_jwks_url: https://relaxing-owl-93.clerk.accounts.dev/.well-known/jwks.json
+          TF_VAR_clerk_issuer: https://relaxing-owl-93.clerk.accounts.dev
+
+      - name: Terraform Init & Apply - Enterprise
+        working-directory: terraform/8_enterprise
+        run: |
+          terraform init
+          terraform apply -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_bedrock_region: us-west-2
+          TF_VAR_bedrock_model_id: us.amazon.nova-pro-v1:0
+
+  # ============================================================
+  # DATABASE SETUP (Migrations + Seed Data)
+  # ============================================================
+
+  setup-database:
+    needs: terraform-deploy-part2
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'deploy'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-alex-infrastructure
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run database migrations and seed data
+        working-directory: backend/database
+        run: |
+          uv sync
+          uv run run_migrations.py
+          uv run seed_data.py
+        env:
+          AURORA_CLUSTER_ARN: ${{ needs.terraform-deploy-part2.outputs.aurora_cluster_arn }}
+          AURORA_SECRET_ARN: ${{ needs.terraform-deploy-part2.outputs.aurora_secret_arn }}
+          AURORA_DATABASE: alex
+          DEFAULT_AWS_REGION: ${{ env.AWS_REGION }}
+
+  # ============================================================
+  # TERRAFORM DESTROY
+  # ============================================================
+
+  terraform-destroy:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'destroy'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-alex-infrastructure
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+          terraform_wrapper: false
+
+      - name: Verify Terraform State Exists
+        run: |
+          if ! aws s3api head-bucket --bucket ${{ env.TERRAFORM_STATE_BUCKET }} 2>/dev/null; then
+            echo "ERROR: S3 state bucket '${{ env.TERRAFORM_STATE_BUCKET }}' does not exist"
+            echo "Cannot proceed with destroy - nothing to destroy"
+            exit 1
+          fi
+          echo "S3 bucket exists: ${{ env.TERRAFORM_STATE_BUCKET }}"
+
+          if ! aws dynamodb describe-table --table-name ${{ env.TERRAFORM_LOCK_TABLE }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "ERROR: DynamoDB table '${{ env.TERRAFORM_LOCK_TABLE }}' does not exist"
+            echo "Cannot proceed with destroy - state locking infrastructure missing"
+            exit 1
+          fi
+          echo "DynamoDB table exists: ${{ env.TERRAFORM_LOCK_TABLE }}"
+
+          STATE_FILES=$(aws s3 ls s3://${{ env.TERRAFORM_STATE_BUCKET }}/ --recursive 2>/dev/null | grep -c "terraform.tfstate" || echo 0)
+
+          if [ "$STATE_FILES" -eq 0 ]; then
+            echo "ERROR: No terraform state files found in S3 bucket"
+            echo "The infrastructure may have already been destroyed"
+            exit 1
+          fi
+
+          echo "Found $STATE_FILES terraform state files - proceeding with destroy"
+
+      - name: Terraform Destroy - Enterprise
+        working-directory: terraform/8_enterprise
+        run: |
+          terraform init
+          terraform destroy -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Destroy - Frontend
+        working-directory: terraform/7_frontend
+        run: |
+          aws s3 rm s3://alex-frontend-603047573807 --recursive 2>/dev/null || true
+          terraform init
+          terraform destroy -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_clerk_jwks_url: https://relaxing-owl-93.clerk.accounts.dev/.well-known/jwks.json
+          TF_VAR_clerk_issuer: https://relaxing-owl-93.clerk.accounts.dev
+
+      - name: Terraform Destroy - Agents
+        working-directory: terraform/6_agents
+        run: |
+          terraform init
+          terraform destroy -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_aurora_cluster_arn: ""
+          TF_VAR_aurora_secret_arn: ""
+          TF_VAR_vector_bucket: ""
+          TF_VAR_bedrock_model_id: ""
+          TF_VAR_bedrock_region: ""
+          TF_VAR_polygon_api_key: ""
+
+      - name: Terraform Destroy - Database
+        working-directory: terraform/5_database
+        run: |
+          terraform init
+          terraform destroy -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+
+      - name: Terraform Destroy - Researcher
+        working-directory: terraform/4_researcher
+        run: |
+          terraform init
+          terraform destroy -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_alex_api_endpoint: ""
+          TF_VAR_alex_api_key: ""
+          TF_VAR_openai_api_key: ""
+
+      - name: Terraform Destroy - Ingestion
+        working-directory: terraform/3_ingestion
+        run: |
+          terraform init
+          terraform destroy -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+          TF_VAR_sagemaker_endpoint_name: ""
+
+      - name: Terraform Destroy - SageMaker
+        working-directory: terraform/2_sagemaker
+        run: |
+          terraform init
+          terraform destroy -auto-approve
+        env:
+          TF_VAR_aws_region: ${{ env.AWS_REGION }}
+
+  # ============================================================
+  # FRONTEND
+  # ============================================================
+
+  deploy-frontend:
+    needs: terraform-deploy-part2
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'deploy'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-alex-infrastructure
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
-      - name: Verify Docker
-        run: docker info
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm install
 
-      - name: Write frontend Clerk env for production build
+      - name: Build NextJS
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          NEXT_PUBLIC_API_URL: ${{ needs.terraform-deploy-part2.outputs.api_gateway_url }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+          terraform_wrapper: false
+
+      - name: Get CloudFront and S3 from Terraform
+        working-directory: terraform/7_frontend
+        id: tf_outputs
         run: |
-          if [ -n "$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY" ]; then
-            echo "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY" > frontend/.env.production
-          fi
+          terraform init
+          echo "s3_bucket=$(terraform output -raw s3_bucket_name)" >> $GITHUB_OUTPUT
+          echo "cloudfront_id=$(terraform output -raw cloudfront_distribution_id)" >> $GITHUB_OUTPUT
 
-      - name: Run scripts/deploy.py
-        run: python3 scripts/deploy.py
-
-      - name: Deployment summary
+      - name: Upload to S3
         run: |
-          echo "## Alex Part 7 (deploy.py)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          cd terraform/7_frontend
-          terraform init -input=false -no-color
-          echo "- **CloudFront:** $(terraform output -raw cloudfront_url)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **API Gateway:** $(terraform output -raw api_gateway_url)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **S3 bucket:** $(terraform output -raw s3_bucket_name)" >> "$GITHUB_STEP_SUMMARY"
+          aws s3 sync frontend/out/ s3://${{ steps.tf_outputs.outputs.s3_bucket }} --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation --distribution-id ${{ steps.tf_outputs.outputs.cloudfront_id }} --paths "/*"
+
+  # ============================================================
+  # DEPLOY SUMMARY
+  # ============================================================
+
+  deploy-summary:
+    needs: [deploy-frontend, setup-database]
+    runs-on: ubuntu-latest
+    if: github.event.inputs.action == 'deploy'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-alex-infrastructure
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.0
+          terraform_wrapper: false
+
+      - name: Get deployment outputs
+        working-directory: terraform/7_frontend
+        id: tf_outputs
+        run: |
+          terraform init
+          echo "cloudfront_url=$(terraform output -raw cloudfront_url)" >> $GITHUB_OUTPUT
+          echo "api_gateway_url=$(terraform output -raw api_gateway_url)" >> $GITHUB_OUTPUT
+
+      - name: Generate deployment summary
+        run: |
+          CLOUDFRONT_URL="${{ steps.tf_outputs.outputs.cloudfront_url }}"
+          API_GATEWAY_URL="${{ steps.tf_outputs.outputs.api_gateway_url }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## Alex Deployment Complete
+
+          | Service | URL |
+          |---------|-----|
+          | **CloudFront** | $CLOUDFRONT_URL |
+          | **API Gateway** | $API_GATEWAY_URL |
+          | **CloudWatch Logs** | [View Logs](https://$AWS_REGION.console.aws.amazon.com/cloudwatch/home?region=$AWS_REGION#logs:prefix=/aws/lambda/alex-) |
+
+          ### Next Steps
+          1. Visit the CloudFront URL to access the frontend
+          2. Sign in with Clerk to create an account
+          3. Add portfolio positions to start using Alex
+          EOF
+
+          echo ""
+          echo "========================================"
+          echo "  ALEX DEPLOYMENT COMPLETE"
+          echo "========================================"
+          echo ""
+          echo "  CloudFront URL:    $CLOUDFRONT_URL"
+          echo "  API Gateway:       $API_GATEWAY_URL"
+          echo "  CloudWatch Logs:   https://$AWS_REGION.console.aws.amazon.com/cloudwatch/home?region=$AWS_REGION#logs:prefix=/aws/lambda/alex-"
+          echo ""
+          echo "========================================"

@@ -8,6 +8,14 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  backend "s3" {
+    bucket         = "alex-terraform-state-603047573807"
+    key            = "8_enterprise/terraform.tfstate"
+    region         = "eu-west-1"
+    dynamodb_table = "alex-terraform-lock"
+    encrypt        = true
+  }
 }
 
 provider "aws" {

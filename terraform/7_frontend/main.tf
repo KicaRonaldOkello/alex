@@ -8,6 +8,14 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  backend "s3" {
+    bucket         = "alex-terraform-state-603047573807"
+    key            = "7_frontend/terraform.tfstate"
+    region         = "eu-west-1"
+    dynamodb_table = "alex-terraform-lock"
+    encrypt        = true
+  }
 }
 
 provider "aws" {
@@ -21,17 +29,21 @@ data "aws_region" "current" {}
 
 # Reference Part 5 Database resources
 data "terraform_remote_state" "database" {
-  backend = "local"
+  backend = "s3"
   config = {
-    path = "../5_database/terraform.tfstate"
+    bucket = "alex-terraform-state-603047573807"
+    key    = "5_database/terraform.tfstate"
+    region = "eu-west-1"
   }
 }
 
 # Reference Part 6 Agents resources
 data "terraform_remote_state" "agents" {
-  backend = "local"
+  backend = "s3"
   config = {
-    path = "../6_agents/terraform.tfstate"
+    bucket = "alex-terraform-state-603047573807"
+    key    = "6_agents/terraform.tfstate"
+    region = "eu-west-1"
   }
 }
 
