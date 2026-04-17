@@ -446,16 +446,10 @@ resource "aws_lambda_function" "retirement" {
   depends_on = [aws_s3_object.lambda_packages["retirement"]]
 }
 
-# CloudWatch Log Groups
+# Log groups without tags (avoids logs:TagResource on create)
 resource "aws_cloudwatch_log_group" "agent_logs" {
   for_each = toset(["planner", "tagger", "reporter", "charter", "retirement"])
   
   name              = "/aws/lambda/alex-${each.key}"
   retention_in_days = 7
-  
-  tags = {
-    Project = "alex"
-    Part    = "6"
-    Agent   = each.key
-  }
 }

@@ -169,15 +169,10 @@ resource "aws_lambda_function" "ingest" {
   }
 }
 
-# CloudWatch Log Group
+# Log group without tags so CreateLogGroup does not require logs:TagResource
 resource "aws_cloudwatch_log_group" "lambda_logs" {
   name              = "/aws/lambda/alex-ingest"
   retention_in_days = 7
-  
-  tags = {
-    Project = "alex"
-    Part    = "3"
-  }
 }
 
 # ========================================
