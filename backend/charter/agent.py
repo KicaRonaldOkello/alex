@@ -12,6 +12,21 @@ from templates import CHARTER_INSTRUCTIONS, create_charter_task
 
 logger = logging.getLogger()
 
+_DEFAULT_OPENROUTER_AGENTS = "openrouter/anthropic/claude-sonnet-4.5"
+
+
+def _litellm_openrouter_model(*, role_env: str) -> LitellmModel:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set (required for OpenRouter / LiteLLM)"
+        )
+    model_name = os.getenv(
+        role_env,
+        os.getenv("OPENROUTER_MODEL_AGENTS", _DEFAULT_OPENROUTER_AGENTS),
+    )
+    return LitellmModel(model=model_name, api_key=api_key)
+
 
 def analyze_portfolio(portfolio_data: Dict[str, Any]) -> str:
     """
@@ -140,16 +155,9 @@ def analyze_portfolio(portfolio_data: Dict[str, Any]) -> str:
 def create_agent(job_id: str, portfolio_data: Dict[str, Any], db=None):
     """Create the charter agent without tools - will output JSON directly."""
     
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
-    bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-    os.environ["AWS_REGION_NAME"] = bedrock_region
-    
-    logger.info(f"Charter: Creating agent with model_id={model_id}, region={bedrock_region}")
+    model = _litellm_openrouter_model(role_env="OPENROUTER_MODEL_CHARTER")
+    logger.info("Charter: Creating agent with OpenRouter model")
     logger.info(f"Charter: Job ID: {job_id}")
-    
-    model = LitellmModel(model=f"bedrock/{model_id}")
     
     # Analyze the portfolio upfront
     portfolio_analysis = analyze_portfolio(portfolio_data)

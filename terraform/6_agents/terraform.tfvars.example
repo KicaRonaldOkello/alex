@@ -40,3 +40,8 @@ polygon_plan    = "free"
 # langfuse_host       = "https://us.cloud.langfuse.com"
 # OpenAI API key (required for OpenAI Agents SDK tracing to work - no balance or spend needed)
 # openai_api_key = ""
+
+# OpenRouter (LiteLLM) for planner, reporter, charter, retirement, tagger — get a key at https://openrouter.ai/keys
+# openrouter_api_key = "sk-or-v1-..."
+# Optional shared default model for those agents (override per role in Lambda env if needed)
+# openrouter_model_agents = "openrouter/anthropic/claude-sonnet-4.5"

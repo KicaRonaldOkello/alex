@@ -1,0 +1,82 @@
+name: Deploy Alex (frontend + API)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-alex-part7-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Part 7 — deploy.py
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      AWS_REGION: ${{ secrets.DEFAULT_AWS_REGION }}
+      DEFAULT_AWS_REGION: ${{ secrets.DEFAULT_AWS_REGION }}
+      TF_VAR_clerk_jwks_url: ${{ secrets.CLERK_JWKS_URL }}
+      TF_VAR_clerk_issuer: ${{ secrets.CLERK_ISSUER }}
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: github-actions-alex-deploy-py
+          aws-region: ${{ secrets.DEFAULT_AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Verify Docker
+        run: docker info
+
+      - name: Write frontend Clerk env for production build
+        run: |
+          if [ -n "$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY" ]; then
+            echo "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=$NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY" > frontend/.env.production
+          fi
+
+      - name: Run scripts/deploy.py
+        run: python3 scripts/deploy.py
+
+      - name: Deployment summary
+        run: |
+          echo "## Alex Part 7 (deploy.py)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cd terraform/7_frontend
+          terraform init -input=false -no-color
+          echo "- **CloudFront:** $(terraform output -raw cloudfront_url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **API Gateway:** $(terraform output -raw api_gateway_url)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **S3 bucket:** $(terraform output -raw s3_bucket_name)" >> "$GITHUB_STEP_SUMMARY"

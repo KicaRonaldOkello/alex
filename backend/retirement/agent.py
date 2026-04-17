@@ -14,6 +14,21 @@ from agents.extensions.models.litellm_model import LitellmModel
 
 logger = logging.getLogger()
 
+_DEFAULT_OPENROUTER_AGENTS = "openrouter/anthropic/claude-sonnet-4.5"
+
+
+def _litellm_openrouter_model(*, role_env: str) -> LitellmModel:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set (required for OpenRouter / LiteLLM)"
+        )
+    model_name = os.getenv(
+        role_env,
+        os.getenv("OPENROUTER_MODEL_AGENTS", _DEFAULT_OPENROUTER_AGENTS),
+    )
+    return LitellmModel(model=model_name, api_key=api_key)
+
 # Context removed - no longer needed without tools
 
 
@@ -238,13 +253,7 @@ def create_agent(
 ):
     """Create the retirement agent with tools and context."""
 
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
-    bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-    os.environ["AWS_REGION_NAME"] = bedrock_region
-
-    model = LitellmModel(model=f"bedrock/{model_id}")
+    model = _litellm_openrouter_model(role_env="OPENROUTER_MODEL_RETIREMENT")
 
     # Extract user preferences
     years_until_retirement = user_preferences.get("years_until_retirement", 30)

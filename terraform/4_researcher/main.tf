@@ -140,9 +140,10 @@ resource "aws_apprunner_service" "researcher" {
       image_configuration {
         port = "8000"
         runtime_environment_variables = {
-          OPENAI_API_KEY    = var.openai_api_key
-          ALEX_API_ENDPOINT = var.alex_api_endpoint
-          ALEX_API_KEY      = var.alex_api_key
+          OPENAI_API_KEY             = var.openai_api_key
+          RESEARCHER_LITELLM_MODEL   = var.researcher_litellm_model
+          ALEX_API_ENDPOINT          = var.alex_api_endpoint
+          ALEX_API_KEY               = var.alex_api_key
         }
       }
       image_repository_type = "ECR"

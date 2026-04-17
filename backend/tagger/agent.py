@@ -23,9 +23,12 @@ load_dotenv(override=True)
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Get configuration
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-west-2")
+# OpenRouter via LiteLLM (see https://docs.litellm.ai/docs/providers/openrouter).
+# Default is OpenAI on OpenRouter: Anthropic structured outputs reject Pydantic's gt=0 → exclusiveMinimum.
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+    "openrouter/openai/gpt-4o-mini",
+)
 
 
 class AllocationBreakdown(BaseModel):
@@ -171,14 +174,13 @@ async def classify_instrument(
         Complete classification with allocations
     """
     try:
-        # Initialize the model
-        model_id = BEDROCK_MODEL_ID
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENROUTER_API_KEY is not set (required for tagger OpenRouter calls)"
+            )
 
-        # Set region for LiteLLM Bedrock calls
-        bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-        os.environ["AWS_REGION_NAME"] = bedrock_region
-
-        model = LitellmModel(model=f"bedrock/{model_id}")
+        model = LitellmModel(model=OPENROUTER_MODEL, api_key=api_key)
 
         # Create the classification task
         task = CLASSIFICATION_PROMPT.format(

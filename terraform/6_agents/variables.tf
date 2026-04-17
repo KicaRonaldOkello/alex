@@ -73,3 +73,16 @@ variable "openai_api_key" {
   default     = ""
   sensitive   = true
 }
+
+variable "openrouter_api_key" {
+  description = "OpenRouter API key for LiteLLM (planner, reporter, charter, retirement; tagger if using OpenRouter)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "openrouter_model_agents" {
+  description = "LiteLLM model string for agents on OpenRouter (default: Claude Sonnet 4.5)"
+  type        = string
+  default     = "openrouter/anthropic/claude-sonnet-4.5"
+}

@@ -9,6 +9,12 @@ variable "openai_api_key" {
   sensitive   = true
 }
 
+variable "researcher_litellm_model" {
+  description = "LiteLLM model id for the researcher (OpenAI API), e.g. openai/gpt-4o or openai/gpt-4o-mini"
+  type        = string
+  default     = "openai/gpt-4o"
+}
+
 variable "alex_api_endpoint" {
   description = "Alex API endpoint from Part 3"
   type        = string

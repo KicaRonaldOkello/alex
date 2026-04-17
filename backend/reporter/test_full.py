@@ -3,10 +3,10 @@
 Full test for Reporter agent via Lambda
 """
 
-import os
 import json
 import boto3
 import time
+from botocore.config import Config
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
@@ -14,11 +14,22 @@ load_dotenv(override=True)
 from src import Database
 from src.schemas import JobCreate
 
+# Synchronous invoke waits for the whole Lambda run; default boto3 read timeout (~60s) is too
+# short for Reporter (LLM + tools + judge). Terraform sets alex-reporter timeout to 300s.
+_LAMBDA_READ_TIMEOUT = 360
+
 def test_reporter_lambda():
     """Test the Reporter agent via Lambda invocation"""
     
     db = Database()
-    lambda_client = boto3.client('lambda')
+    lambda_client = boto3.client(
+        "lambda",
+        config=Config(
+            read_timeout=_LAMBDA_READ_TIMEOUT,
+            connect_timeout=10,
+            retries={"max_attempts": 3, "mode": "standard"},
+        ),
+    )
     
     # Create test job
     test_user_id = "test_user_001"

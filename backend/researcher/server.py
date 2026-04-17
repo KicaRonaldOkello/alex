@@ -24,7 +24,14 @@ from tools import ingest_financial_document
 # Load environment
 load_dotenv(override=True)
 
+# LiteLLM OpenAI route (override with RESEARCHER_LITELLM_MODEL, e.g. openai/gpt-4o-mini)
+DEFAULT_RESEARCH_MODEL = "openai/gpt-4o"
+
 app = FastAPI(title="Alex Researcher Service")
+
+
+def _research_litellm_model_id() -> str:
+    return os.getenv("RESEARCHER_LITELLM_MODEL", DEFAULT_RESEARCH_MODEL).strip()
 
 
 # Request model
@@ -35,27 +42,19 @@ class ResearchRequest(BaseModel):
 async def run_research_agent(topic: str = None) -> str:
     """Run the research agent to generate investment advice."""
 
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Add it to .env locally or terraform openai_api_key for App Runner."
+        )
+
     # Prepare the user query
     if topic:
         query = f"Research this investment topic: {topic}"
     else:
         query = DEFAULT_RESEARCH_PROMPT
 
-    # Please override these variables with the region you are using
-    # Other choices: us-west-2 (for OpenAI OSS models) and eu-central-1
-    REGION = "us-east-1"
-    os.environ["AWS_REGION_NAME"] = REGION  # LiteLLM's preferred variable
-    os.environ["AWS_REGION"] = REGION  # Boto3 standard
-    os.environ["AWS_DEFAULT_REGION"] = REGION  # Fallback
-
-    # Please override this variable with the model you are using
-    # Common choices: bedrock/eu.amazon.nova-pro-v1:0 for EU and bedrock/us.amazon.nova-pro-v1:0 for US
-    # or bedrock/amazon.nova-pro-v1:0 if you are not using inference profiles
-    # bedrock/openai.gpt-oss-120b-1:0 for OpenAI OSS models
-    # bedrock/converse/us.anthropic.claude-sonnet-4-20250514-v1:0 for Claude Sonnet 4
-    # NOTE that nova-pro is needed to support tools and MCP servers; nova-lite is not enough - thank you Yuelin L.!
-    MODEL = "bedrock/us.amazon.nova-pro-v1:0"
-    model = LitellmModel(model=MODEL)
+    model_id = _research_litellm_model_id()
+    model = LitellmModel(model=model_id)
 
     # Create and run the agent with MCP server
     with trace("Researcher"):
@@ -146,40 +145,20 @@ async def health():
         "timestamp": datetime.now(UTC).isoformat(),
         "debug_container": container_indicators,
         "aws_region": os.environ.get("AWS_DEFAULT_REGION", "not set"),
-        "bedrock_model": "bedrock/amazon.nova-pro-v1:0",
+        "openai_api_key_configured": bool(os.getenv("OPENAI_API_KEY")),
+        "litellm_model": _research_litellm_model_id(),
     }
 
 
-@app.get("/test-bedrock")
-async def test_bedrock():
-    """Test Bedrock connection directly."""
+@app.get("/test-openai")
+async def test_openai():
+    """Smoke test OpenAI via LiteLLM (same model id as /research)."""
     try:
-        import boto3
+        if not os.getenv("OPENAI_API_KEY"):
+            return {"status": "error", "error": "OPENAI_API_KEY is not set"}
 
-        # Set ALL region environment variables
-        os.environ["AWS_REGION_NAME"] = "us-east-1"
-        os.environ["AWS_REGION"] = "us-east-1"
-        os.environ["AWS_DEFAULT_REGION"] = "us-east-1"
-
-        # Debug: Check what region boto3 is actually using
-        session = boto3.Session()
-        actual_region = session.region_name
-
-        # Try to create Bedrock client explicitly in us-west-2
-        client = boto3.client("bedrock-runtime", region_name="us-west-2")
-
-        # Debug: Try to list models to verify connection
-        try:
-            bedrock_client = boto3.client("bedrock", region_name="us-west-2")
-            models = bedrock_client.list_foundation_models()
-            openai_models = [
-                m["modelId"] for m in models["modelSummaries"] if "openai" in m["modelId"].lower()
-            ]
-        except Exception as list_error:
-            openai_models = f"Error listing: {str(list_error)}"
-
-        # Try basic model invocation with Nova Pro
-        model = LitellmModel(model="bedrock/amazon.nova-pro-v1:0")
+        model_id = _research_litellm_model_id()
+        model = LitellmModel(model=model_id)
 
         agent = Agent(
             name="Test Agent",
@@ -191,13 +170,8 @@ async def test_bedrock():
 
         return {
             "status": "success",
-            "model": str(model.model),  # Use actual model from LitellmModel
-            "region": actual_region,
+            "model": model_id,
             "response": result.final_output,
-            "debug": {
-                "boto3_session_region": actual_region,
-                "available_openai_models": openai_models,
-            },
         }
     except Exception as e:
         import traceback
@@ -207,14 +181,6 @@ async def test_bedrock():
             "error": str(e),
             "type": type(e).__name__,
             "traceback": traceback.format_exc(),
-            "debug": {
-                "boto3_session_region": session.region_name if "session" in locals() else "unknown",
-                "env_vars": {
-                    "AWS_REGION_NAME": os.environ.get("AWS_REGION_NAME"),
-                    "AWS_REGION": os.environ.get("AWS_REGION"),
-                    "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION"),
-                },
-            },
         }
 
 

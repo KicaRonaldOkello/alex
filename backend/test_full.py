@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Full end-to-end test via SQS for the Alex platform"""
 
-import os
 import json
 import boto3
 import time
@@ -123,7 +122,8 @@ def main():
     print("-" * 50)
     
     start_time = time.time()
-    timeout = 180  # 3 minutes
+    # Planner Lambda max is 900s; allow headroom for cold starts + sequential agents.
+    timeout = 960
     last_status = None
     
     while time.time() - start_time < timeout:
@@ -199,7 +199,8 @@ def main():
         time.sleep(2)
     else:
         print("-" * 50)
-        print("\n❌ Job timed out after 3 minutes")
+        elapsed = int(time.time() - start_time)
+        print(f"\n❌ Job timed out after {elapsed}s (limit {timeout}s)")
         print(f"Final status: {job['status']}")
         return 1
     

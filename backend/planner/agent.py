@@ -15,6 +15,22 @@ from agents.extensions.models.litellm_model import LitellmModel
 
 logger = logging.getLogger()
 
+# OpenRouter via LiteLLM (separate from tagger's OPENROUTER_MODEL to avoid mixing defaults).
+_DEFAULT_OPENROUTER_AGENTS = "openrouter/anthropic/claude-sonnet-4.5"
+
+
+def _litellm_openrouter_model(*, role_env: str) -> LitellmModel:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set (required for OpenRouter / LiteLLM)"
+        )
+    model_name = os.getenv(
+        role_env,
+        os.getenv("OPENROUTER_MODEL_AGENTS", _DEFAULT_OPENROUTER_AGENTS),
+    )
+    return LitellmModel(model=model_name, api_key=api_key)
+
 # Initialize Lambda client
 lambda_client = boto3.client("lambda")
 
@@ -262,13 +278,7 @@ def create_agent(job_id: str, portfolio_summary: Dict[str, Any], db):
     # Create context for tools
     context = PlannerContext(job_id=job_id)
 
-    # Get model configuration
-    model_id = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-7-sonnet-20250219-v1:0")
-    # Set region for LiteLLM Bedrock calls
-    bedrock_region = os.getenv("BEDROCK_REGION", "us-west-2")
-    os.environ["AWS_REGION_NAME"] = bedrock_region
-
-    model = LitellmModel(model=f"bedrock/{model_id}")
+    model = _litellm_openrouter_model(role_env="OPENROUTER_MODEL_PLANNER")
 
     tools = [
         invoke_reporter,

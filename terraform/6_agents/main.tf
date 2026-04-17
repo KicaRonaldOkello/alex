@@ -249,8 +249,10 @@ resource "aws_lambda_function" "planner" {
       # LangFuse observability (optional)
       LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
       LANGFUSE_SECRET_KEY = var.langfuse_secret_key
-      LANGFUSE_HOST       = var.langfuse_host
-      OPENAI_API_KEY      = var.openai_api_key
+      LANGFUSE_HOST            = var.langfuse_host
+      OPENAI_API_KEY           = var.openai_api_key
+      OPENROUTER_API_KEY       = var.openrouter_api_key
+      OPENROUTER_MODEL_AGENTS  = var.openrouter_model_agents
     }
   }
 
@@ -296,8 +298,10 @@ resource "aws_lambda_function" "tagger" {
       # LangFuse observability (optional)
       LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
       LANGFUSE_SECRET_KEY = var.langfuse_secret_key
-      LANGFUSE_HOST       = var.langfuse_host
-      OPENAI_API_KEY      = var.openai_api_key
+      LANGFUSE_HOST            = var.langfuse_host
+      OPENAI_API_KEY           = var.openai_api_key
+      OPENROUTER_API_KEY       = var.openrouter_api_key
+      OPENROUTER_MODEL_AGENTS  = var.openrouter_model_agents
     }
   }
   
@@ -337,8 +341,10 @@ resource "aws_lambda_function" "reporter" {
       # LangFuse observability (optional)
       LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
       LANGFUSE_SECRET_KEY = var.langfuse_secret_key
-      LANGFUSE_HOST       = var.langfuse_host
-      OPENAI_API_KEY      = var.openai_api_key
+      LANGFUSE_HOST            = var.langfuse_host
+      OPENAI_API_KEY           = var.openai_api_key
+      OPENROUTER_API_KEY       = var.openrouter_api_key
+      OPENROUTER_MODEL_AGENTS  = var.openrouter_model_agents
     }
   }
 
@@ -377,8 +383,10 @@ resource "aws_lambda_function" "charter" {
       # LangFuse observability (optional)
       LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
       LANGFUSE_SECRET_KEY = var.langfuse_secret_key
-      LANGFUSE_HOST       = var.langfuse_host
-      OPENAI_API_KEY      = var.openai_api_key
+      LANGFUSE_HOST            = var.langfuse_host
+      OPENAI_API_KEY           = var.openai_api_key
+      OPENROUTER_API_KEY       = var.openrouter_api_key
+      OPENROUTER_MODEL_AGENTS  = var.openrouter_model_agents
     }
   }
 
@@ -417,8 +425,10 @@ resource "aws_lambda_function" "retirement" {
       # LangFuse observability (optional)
       LANGFUSE_PUBLIC_KEY = var.langfuse_public_key
       LANGFUSE_SECRET_KEY = var.langfuse_secret_key
-      LANGFUSE_HOST       = var.langfuse_host
-      OPENAI_API_KEY      = var.openai_api_key
+      LANGFUSE_HOST            = var.langfuse_host
+      OPENAI_API_KEY           = var.openai_api_key
+      OPENROUTER_API_KEY       = var.openrouter_api_key
+      OPENROUTER_MODEL_AGENTS  = var.openrouter_model_agents
     }
   }
 
