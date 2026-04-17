@@ -21,6 +21,17 @@ provider "aws" {
   region = var.aws_region
 }
 
+# S3 bucket sub-resources (versioning, encryption, public access) call regional endpoints;
+# they must use the bucket's region or reads fail with PermanentRedirect.
+provider "aws" {
+  alias  = "s3_vectors"
+  region = local.s3_vectors_region
+}
+
+locals {
+  s3_vectors_region = coalesce(var.s3_vectors_region, var.aws_region)
+}
+
 # Data source for current caller identity
 data "aws_caller_identity" "current" {}
 
@@ -29,6 +40,8 @@ data "aws_caller_identity" "current" {}
 # ========================================
 
 resource "aws_s3_bucket" "vectors" {
+  provider = aws.s3_vectors
+
   bucket = "alex-vectors-${data.aws_caller_identity.current.account_id}"
   
   tags = {
@@ -38,6 +51,8 @@ resource "aws_s3_bucket" "vectors" {
 }
 
 resource "aws_s3_bucket_versioning" "vectors" {
+  provider = aws.s3_vectors
+
   bucket = aws_s3_bucket.vectors.id
   
   versioning_configuration {
@@ -46,6 +61,8 @@ resource "aws_s3_bucket_versioning" "vectors" {
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "vectors" {
+  provider = aws.s3_vectors
+
   bucket = aws_s3_bucket.vectors.id
   
   rule {
@@ -56,6 +73,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "vectors" {
 }
 
 resource "aws_s3_bucket_public_access_block" "vectors" {
+  provider = aws.s3_vectors
+
   bucket = aws_s3_bucket.vectors.id
   
   block_public_acls       = true
@@ -136,7 +155,7 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "s3vectors:GetVectors",
           "s3vectors:DeleteVectors"
         ]
-        Resource = "arn:aws:s3vectors:${var.aws_region}:${data.aws_caller_identity.current.account_id}:bucket/${aws_s3_bucket.vectors.id}/index/*"
+        Resource = "arn:aws:s3vectors:${local.s3_vectors_region}:${data.aws_caller_identity.current.account_id}:bucket/${aws_s3_bucket.vectors.id}/index/*"
       }
     ]
   })
