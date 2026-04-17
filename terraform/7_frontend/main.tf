@@ -12,7 +12,7 @@ terraform {
   backend "s3" {
     bucket         = "alex-terraform-state-218254970853"
     key            = "7_frontend/terraform.tfstate"
-    region         = "eu-west-1"
+    region         = "us-east-1"
     dynamodb_table = "alex-terraform-lock"
     encrypt        = true
   }
@@ -33,7 +33,7 @@ data "terraform_remote_state" "database" {
   config = {
     bucket = "alex-terraform-state-218254970853"
     key    = "5_database/terraform.tfstate"
-    region = "eu-west-1"
+    region = "us-east-1"
   }
 }
 
@@ -43,7 +43,7 @@ data "terraform_remote_state" "agents" {
   config = {
     bucket = "alex-terraform-state-218254970853"
     key    = "6_agents/terraform.tfstate"
-    region = "eu-west-1"
+    region = "us-east-1"
   }
 }
 

@@ -11,7 +11,7 @@ terraform {
   backend "s3" {
     bucket         = "alex-terraform-state-218254970853"
     key            = "2_sagemaker/terraform.tfstate"
-    region         = "eu-west-1"
+    region         = "us-east-1"
     dynamodb_table = "alex-terraform-lock"
     encrypt        = true
   }
