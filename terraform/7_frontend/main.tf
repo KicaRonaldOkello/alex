@@ -207,7 +207,8 @@ resource "aws_lambda_function" "api" {
   function_name    = "${local.name_prefix}-api"
   role             = aws_iam_role.api_lambda_role.arn
   handler          = "lambda_handler.handler"
-  source_code_hash = fileexists("${path.module}/../../backend/api/api_lambda.zip") ? filebase64sha256("${path.module}/../../backend/api/api_lambda.zip") : null
+  # try(): destroy/CI often have no zip; plain filebase64sha256 fails during plan/destroy
+  source_code_hash = try(filebase64sha256("${path.module}/../../backend/api/api_lambda.zip"), null)
   runtime          = "python3.12"
   architectures    = ["x86_64"]
   timeout          = 30
