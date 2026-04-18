@@ -276,6 +276,24 @@ jobs:
             terraform import aws_iam_role.sagemaker_role alex-sagemaker-role || true
           fi
 
+          # SageMaker resources are separate from IAM: partial/failed destroy or state loss
+          # leaves names in AWS and the next apply hits "already exists". Import in dependency order.
+          if aws sagemaker describe-model --model-name alex-embedding-model --region "$AWS_REGION" 2>/dev/null && \
+             ! terraform state show aws_sagemaker_model.embedding_model 2>/dev/null; then
+            echo "Importing existing SageMaker model into Terraform state..."
+            terraform import aws_sagemaker_model.embedding_model alex-embedding-model || true
+          fi
+          if aws sagemaker describe-endpoint-config --endpoint-config-name alex-embedding-serverless-config --region "$AWS_REGION" 2>/dev/null && \
+             ! terraform state show aws_sagemaker_endpoint_configuration.serverless_config 2>/dev/null; then
+            echo "Importing existing SageMaker endpoint configuration into Terraform state..."
+            terraform import aws_sagemaker_endpoint_configuration.serverless_config alex-embedding-serverless-config || true
+          fi
+          if aws sagemaker describe-endpoint --endpoint-name alex-embedding-endpoint --region "$AWS_REGION" 2>/dev/null && \
+             ! terraform state show aws_sagemaker_endpoint.embedding_endpoint 2>/dev/null; then
+            echo "Importing existing SageMaker endpoint into Terraform state..."
+            terraform import aws_sagemaker_endpoint.embedding_endpoint alex-embedding-endpoint || true
+          fi
+
           terraform apply -auto-approve
           echo "sagemaker_endpoint_name=$(terraform output -raw sagemaker_endpoint_name)" >> $GITHUB_OUTPUT
         env:
